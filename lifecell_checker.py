@@ -23,8 +23,20 @@ POLL = 0.05
 def load_numbers():
     if not os.path.exists(NUMBERS_FILE):
         return []
+    out = []
     with open(NUMBERS_FILE, "r", encoding="utf-8") as f:
-        return [re.sub(r"\D+", "", x.strip()) for x in f if x.strip()]
+        for line in f:
+            s = re.sub(r"\D+", "", line.strip())
+            if not s:
+                continue
+            # підтримка і 9 цифр, і 380XXXXXXXXX
+            if len(s) == 9:
+                out.append(s)
+            elif s.startswith("380") and len(s) == 12:
+                out.append(s[3:])
+            else:
+                out.append(s)
+    return out
 
 
 def save_numbers(numbers):
@@ -89,12 +101,14 @@ class App:
     # ---------------- Selenium ----------------
 
     def js_click(self, driver, el):
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
         driver.execute_script("arguments[0].click();", el)
 
     def ensure_client(self, driver, wait):
+        # якщо кнопка "Клієнт" є — натиснемо, якщо нема — працюємо як є
         try:
             client = WebDriverWait(driver, 1.5, poll_frequency=POLL).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[normalize-space()='Клієнт']"))
+                EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'label') and normalize-space(.)='Клієнт']"))
             )
             self.js_click(driver, client)
         except Exception:
@@ -102,86 +116,151 @@ class App:
 
         wait.until(EC.presence_of_element_located((By.ID, "msisdn")))
 
-    def set_number(self, driver, wait, number):
+    def set_number(self, driver, wait, number9):
         inp = wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
-        full = "380" + number
+        full = "380" + number9
         driver.execute_script(
             """
             const el = arguments[0];
             const v = arguments[1];
-            const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
-            s.call(el, '');
-            s.call(el, v);
+            el.focus();
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+            setter.call(el, '');
             el.dispatchEvent(new InputEvent('input',{bubbles:true}));
+            setter.call(el, v);
+            el.dispatchEvent(new InputEvent('input',{bubbles:true}));
+            el.dispatchEvent(new Event('change',{bubbles:true}));
             """,
             inp, full
         )
 
     def click_search(self, driver, wait):
-        btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[text()='Пошук']")))
+        # ✅ ФІКС: клікаємо по КНОПЦІ, а не по span (в mat-button-wrapper можуть бути пробіли)
+        btn = wait.until(EC.element_to_be_clickable((
+            By.XPATH,
+            "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
+        )))
         self.js_click(driver, btn)
 
     def has_services(self, driver):
-        return len(driver.find_elements(By.XPATH, "//div[normalize-space()='Реєстрація послуг']")) > 0
+        return len(driver.find_elements(By.XPATH, "//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']")) > 0
 
-    def register(self, driver):
-        self.js_click(driver, driver.find_element(By.XPATH, "//div[contains(text(),'Реєстрація стартового пакету')]"))
-        self.js_click(driver, driver.find_element(By.XPATH, "//span[text()='Зареєструвати']"))
-        self.js_click(driver, driver.find_element(By.XPATH, "//span[text()='Ок']"))
+    def register_start_pack(self, driver):
+        self.js_click(driver, driver.find_element(
+            By.XPATH, "//div[contains(@class,'label') and contains(normalize-space(.),'Реєстрація стартового пакету')]"
+        ))
+        self.js_click(driver, driver.find_element(
+            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
+        ))
+        self.js_click(driver, driver.find_element(
+            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
+        ))
 
-    def back(self, driver):
-        self.js_click(driver, driver.find_element(By.XPATH, "//mat-icon[text()='arrow_back']"))
+    def back(self, driver, wait):
+        btn = wait.until(EC.element_to_be_clickable((
+            By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]"
+        )))
+        self.js_click(driver, btn)
 
     # ---------------- MAIN ----------------
 
     def run(self):
         numbers = load_numbers()
+        if not numbers:
+            messagebox.showerror("Помилка", "numbers.txt порожній або не знайдено.")
+            self.btn_start.configure(state="normal")
+            self.btn_stop.configure(state="disabled")
+            return
+
         total = len(numbers)
         self.progress.set(f"0 / {total}")
 
-        driver = webdriver.Chrome()
-        wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS)
-        wait = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
+        driver = None
+        try:
+            driver = webdriver.Chrome()
+            wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
+            wait = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
 
-        driver.get(URL)
-        self.log("Очікую логін...")
-        wait_login.until(EC.presence_of_element_located((By.XPATH, "//div[normalize-space()='Клієнт']")))
-        self.log("Авторизація OK")
+            driver.get(URL)
+            self.log("Очікую логін...")
+            wait_login.until(EC.presence_of_element_located(
+                (By.XPATH, "//div[contains(@class,'label') and normalize-space(.)='Клієнт']")
+            ))
+            self.log("Авторизація OK")
 
-        i = 0
-        while numbers and not self.stop_event.is_set():
-            number = numbers[0]
-            i += 1
-            self.progress.set(f"{i} / {total}")
-            self.status.set(f"380{number}")
-            self.log(f"→ 380{number}")
+            remaining = []
+            done = 0
 
-            self.ensure_client(driver, wait)
-            self.set_number(driver, wait, number)
-            self.click_search(driver, wait)
+            for number in numbers:
+                if self.stop_event.is_set():
+                    break
 
+                done += 1
+                self.progress.set(f"{done} / {total}")
+                self.status.set(f"380{number}")
+                self.log(f"→ 380{number}")
+
+                try:
+                    self.ensure_client(driver, wait)
+                    self.set_number(driver, wait, number)
+                    self.click_search(driver, wait)
+
+                    # чекаємо трохи на появу "Реєстрація послуг"
+                    try:
+                        WebDriverWait(driver, 4, poll_frequency=POLL).until(lambda d: self.has_services(d))
+                        # є "Реєстрація послуг" → робимо реєстрацію стартового пакету
+                        self.register_start_pack(driver)
+
+                        with open(VALID_FILE, "a", encoding="utf-8") as f:
+                            f.write(number + "\n")
+
+                        # ✅ ТІЛЬКИ ЗАРЕЄСТРОВАНІ видаляємо з numbers.txt (тобто НЕ додаємо в remaining)
+                        self.log("  ✔ Зареєстровано → VALID (видалено з numbers.txt)")
+                        continue
+
+                    except Exception:
+                        # немає "Реєстрація послуг" → TRASH + назад, але номер лишається в numbers.txt
+                        with open(TRASH_FILE, "a", encoding="utf-8") as f:
+                            f.write(number + "\n")
+                        self.log("  🗑 Нема «Реєстрація послуг» → TRASH (залишив у numbers.txt)")
+                        try:
+                            self.back(driver, wait)
+                        except Exception:
+                            pass
+
+                        remaining.append(number)
+                        continue
+
+                except Exception:
+                    # якщо десь зламалось на номері — теж залишимо в numbers.txt
+                    with open(TRASH_FILE, "a", encoding="utf-8") as f:
+                        f.write(number + "\n")
+                    self.log("  🗑 Помилка на номері → TRASH (залишив у numbers.txt)")
+                    remaining.append(number)
+                    try:
+                        self.back(driver, wait)
+                    except Exception:
+                        pass
+                    continue
+
+            # оновлюємо numbers.txt: лишаються тільки НЕзареєстровані
+            save_numbers(remaining)
+
+            if self.stop_event.is_set():
+                self.status.set("Зупинено ✅")
+                self.log("⏹ Зупинено. numbers.txt оновлено (зареєстровані прибрані).")
+            else:
+                self.status.set("Готово ✅")
+                self.log("Завершено. numbers.txt оновлено (зареєстровані прибрані).")
+
+        finally:
             try:
-                WebDriverWait(driver, 4, poll_frequency=POLL).until(
-                    lambda d: self.has_services(d)
-                )
-                self.register(driver)
-                with open(VALID_FILE, "a", encoding="utf-8") as f:
-                    f.write(number + "\n")
-                numbers.pop(0)
-                save_numbers(numbers)
-                self.log("  ✔ Зареєстровано")
+                if driver:
+                    driver.quit()
             except Exception:
-                with open(TRASH_FILE, "a", encoding="utf-8") as f:
-                    f.write(number + "\n")
-                self.back(driver)
-                numbers.pop(0)
-                save_numbers(numbers)
-                self.log("  🗑 TRASH")
-
-        driver.quit()
-        self.status.set("Готово")
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
+                pass
+            self.btn_start.configure(state="normal")
+            self.btn_stop.configure(state="disabled")
 
 
 if __name__ == "__main__":
