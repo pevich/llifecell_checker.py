@@ -17,7 +17,7 @@ TRASH_FILE = "trash.txt"
 
 WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 12
-WAIT_RESULT_SECONDS = 8
+WAIT_RESULT_SECONDS = 9
 POLL = 0.05
 
 
@@ -102,7 +102,6 @@ class App:
         driver.execute_script("arguments[0].click();", el)
 
     def wait_client_button(self, driver):
-        # ✅ клікабельний контейнер Клієнт (content -> label)
         return WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL).until(
             EC.element_to_be_clickable((
                 By.XPATH,
@@ -111,26 +110,17 @@ class App:
         )
 
     def click_client(self, driver):
-        el = self.wait_client_button(driver)
-        self.js_click(driver, el)
+        self.js_click(driver, self.wait_client_button(driver))
 
     def wait_msisdn_ready(self, driver):
         wait = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
-        # інколи потрібно клікнути саме по infix, але тут хоча б дочекаємось input
         wait.until(EC.presence_of_element_located((By.ID, "msisdn")))
         wait.until(EC.element_to_be_clickable((By.ID, "msisdn")))
         return wait
 
     def ensure_client_form(self, driver):
-        """
-        ✅ Завжди повертаємось на головний екран і клікаємо "Клієнт",
-        щоб не було ситуації "повернувся, але не відкрив форму".
-        """
-        # якщо msisdn уже є — ок
         if len(driver.find_elements(By.ID, "msisdn")) > 0:
             return self.wait_msisdn_ready(driver)
-
-        # інакше клікаємо клієнт
         self.click_client(driver)
         return self.wait_msisdn_ready(driver)
 
@@ -141,8 +131,8 @@ class App:
             """
             const el = arguments[0];
             const v = arguments[1];
-            el.focus();
             const s = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+            el.focus();
             s.call(el,'');
             el.dispatchEvent(new InputEvent('input',{bubbles:true}));
             s.call(el,v);
@@ -158,59 +148,63 @@ class App:
         )))
         self.js_click(driver, btn)
 
-    # ✅ тільки перевірка наявності menu-item-content -> label Реєстрація послуг
+    # ✅ тільки перевірка "Реєстрація послуг"
     def has_services_menu(self, driver):
         return len(driver.find_elements(
             By.XPATH,
             "//div[contains(@class,'menu-item-content')]//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']"
         )) > 0
 
-    def register_start_pack(self, driver):
-        wait = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
+    # ✅ додаткова перевірка: чи є "Реєстрація стартового пакету" (саме як content->label)
+    def has_start_pack(self, driver):
+        return len(driver.find_elements(
+            By.XPATH,
+            "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
+        )) > 0
 
-        self.js_click(driver, wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']"
-        ))))
+    def click_start_pack(self, driver, wait):
+        el = wait.until(EC.element_to_be_clickable((
+            By.XPATH,
+            "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Реєстрація стартового пакету']]"
+        )))
+        self.js_click(driver, el)
 
-        self.js_click(driver, wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
-        ))))
-
-        self.js_click(driver, wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
-        ))))
-
-    def click_back(self, driver):
-        wait = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
+    def click_register(self, driver, wait):
         btn = wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]"
+            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
         )))
         self.js_click(driver, btn)
 
+    def click_ok(self, driver, wait):
+        btn = wait.until(EC.element_to_be_clickable((
+            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
+        )))
+        self.js_click(driver, btn)
+
+    def click_back_if_exists(self, driver):
+        backs = driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")
+        if backs:
+            self.js_click(driver, backs[0])
+            return True
+        return False
+
     def back_to_home_and_open_client(self, driver):
         """
-        ✅ Гарантовано:
-        1) якщо є "назад" — натиснути (може бути 1-2 рівні)
-        2) вийти на екран де є Клієнт
-        3) натиснути Клієнт
+        ✅ Повертаємось поки не побачимо кнопку Клієнт, потім тиснемо її, щоб знов було поле msisdn.
         """
-        # натискаємо назад поки не з’явиться "Клієнт" або msisdn
-        for _ in range(3):
+        for _ in range(4):
             if len(driver.find_elements(By.ID, "msisdn")) > 0:
                 return self.wait_msisdn_ready(driver)
-            if len(driver.find_elements(By.XPATH, "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]")) > 0:
+
+            if len(driver.find_elements(By.XPATH,
+                    "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]")) > 0:
                 self.click_client(driver)
                 return self.wait_msisdn_ready(driver)
-            # якщо ще не там — тиснемо назад, якщо є
-            if len(driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")) > 0:
-                try:
-                    self.click_back(driver)
-                except Exception:
-                    pass
-            else:
+
+            if not self.click_back_if_exists(driver):
                 break
 
-        # fallback: просто спроба клікнути клієнт
+        # fallback
         self.click_client(driver)
         return self.wait_msisdn_ready(driver)
 
@@ -228,7 +222,6 @@ class App:
         driver.get(URL)
         self.log("Очікую логін...")
 
-        # логін готовий коли є блок Клієнт
         wait_login.until(EC.presence_of_element_located((
             By.XPATH,
             "//div[contains(@class,'content')][.//div[contains(@class,'label') and normalize-space(.)='Клієнт']]"
@@ -248,26 +241,33 @@ class App:
                 self.log(f"→ 380{number}")
 
                 try:
-                    # ✅ завжди відкриваємо форму клієнта через кнопку Клієнт
                     wait = self.back_to_home_and_open_client(driver)
 
                     self.set_number(driver, wait, number)
                     self.click_search(driver, wait)
 
-                    # чекаємо поки або з’явиться меню (services), або просто пройде час
+                    # даємо сторінці прогрузити меню/кнопки
                     WebDriverWait(driver, WAIT_RESULT_SECONDS, poll_frequency=POLL).until(lambda d: True)
 
-                    if self.has_services_menu(driver):
-                        self.register_start_pack(driver)
+                    # ✅ НОВА ЛОГІКА:
+                    # Якщо є "Реєстрація послуг" І є "Реєстрація стартового пакету" -> тоді реєструємо
+                    if self.has_services_menu(driver) and self.has_start_pack(driver):
+                        self.log("  ✓ Є «Реєстрація послуг» + «Реєстрація стартового пакету» → реєструю…")
+                        self.click_start_pack(driver, wait)
+                        self.click_register(driver, wait)
+                        self.click_ok(driver, wait)
+
                         with open(VALID_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
                         self.log("  ✔ Зареєстровано → VALID (видалено з numbers.txt)")
+
                     else:
                         with open(TRASH_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
-                        self.log("  🗑 Нема «Реєстрація послуг» → TRASH")
+                        self.log("  🗑 Нема потрібних елементів → TRASH")
+                        remaining.append(number)
 
-                    # ✅ ПОВЕРНУТИСЬ НАЗАД І ВІДКРИТИ КЛІЄНТ ДЛЯ НАСТУПНОГО
+                    # ✅ завжди повернутись на форму клієнта для наступного номера
                     self.back_to_home_and_open_client(driver)
 
                 except Exception:
@@ -279,7 +279,6 @@ class App:
                     except Exception:
                         pass
 
-            # numbers.txt: лишаємо тільки НЕзареєстровані
             save_numbers(remaining)
 
         finally:
