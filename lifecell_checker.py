@@ -16,8 +16,13 @@ VALID_FILE = "valid.txt"
 TRASH_FILE = "trash.txt"
 
 WAIT_LOGIN_SECONDS = 600
+
+# TURBO
 WAIT_UI_SECONDS = 8
 POLL = 0.05
+
+# після пошуку даємо більше часу, бо інколи блок "Реєстрація послуг" підтягується не миттєво
+WAIT_RESULT_SECONDS = 7
 
 
 def load_numbers():
@@ -29,7 +34,6 @@ def load_numbers():
             s = re.sub(r"\D+", "", line.strip())
             if not s:
                 continue
-            # підтримка і 9 цифр, і 380XXXXXXXXX
             if len(s) == 9:
                 out.append(s)
             elif s.startswith("380") and len(s) == 12:
@@ -105,7 +109,6 @@ class App:
         driver.execute_script("arguments[0].click();", el)
 
     def ensure_client(self, driver, wait):
-        # якщо кнопка "Клієнт" є — натиснемо, якщо нема — працюємо як є
         try:
             client = WebDriverWait(driver, 1.5, poll_frequency=POLL).until(
                 EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'label') and normalize-space(.)='Клієнт']"))
@@ -113,7 +116,6 @@ class App:
             self.js_click(driver, client)
         except Exception:
             pass
-
         wait.until(EC.presence_of_element_located((By.ID, "msisdn")))
 
     def set_number(self, driver, wait, number9):
@@ -135,15 +137,32 @@ class App:
         )
 
     def click_search(self, driver, wait):
-        # ✅ ФІКС: клікаємо по КНОПЦІ, а не по span (в mat-button-wrapper можуть бути пробіли)
         btn = wait.until(EC.element_to_be_clickable((
             By.XPATH,
             "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Пошук']]"
         )))
         self.js_click(driver, btn)
 
+    # ✅ FIX: шукаємо "Реєстрація послуг" у будь-якому вкладенні, як на твоєму прикладі (content -> label)
     def has_services(self, driver):
-        return len(driver.find_elements(By.XPATH, "//div[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']")) > 0
+        return len(driver.find_elements(
+            By.XPATH,
+            "//*[contains(@class,'label') and normalize-space(.)='Реєстрація послуг']"
+        )) > 0
+
+    # додатковий "якір", щоб розуміти що результат хоч якось прогрузився (навіть якщо немає services)
+    def has_any_result_marker(self, driver):
+        # шукаємо або кнопку назад, або блоки з label, або будь-який mat-card/контент
+        return (
+            len(driver.find_elements(By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]")) > 0
+            or len(driver.find_elements(By.XPATH, "//*[contains(@class,'label')]")) > 0
+            or len(driver.find_elements(By.XPATH, "//*[contains(@class,'mat-card') or contains(@class,'content')]")) > 0
+        )
+
+    def wait_result_loaded(self, driver):
+        WebDriverWait(driver, WAIT_RESULT_SECONDS, poll_frequency=POLL).until(
+            lambda d: self.has_services(d) or self.has_any_result_marker(d)
+        )
 
     def register_start_pack(self, driver):
         self.js_click(driver, driver.find_element(
@@ -205,34 +224,45 @@ class App:
                     self.set_number(driver, wait, number)
                     self.click_search(driver, wait)
 
-                    # чекаємо трохи на появу "Реєстрація послуг"
+                    # ✅ чекаємо, поки результат прогрузиться (або services, або хоч якийсь маркер)
                     try:
-                        WebDriverWait(driver, 4, poll_frequency=POLL).until(lambda d: self.has_services(d))
-                        # є "Реєстрація послуг" → робимо реєстрацію стартового пакету
-                        self.register_start_pack(driver)
-
-                        with open(VALID_FILE, "a", encoding="utf-8") as f:
-                            f.write(number + "\n")
-
-                        # ✅ ТІЛЬКИ ЗАРЕЄСТРОВАНІ видаляємо з numbers.txt (тобто НЕ додаємо в remaining)
-                        self.log("  ✔ Зареєстровано → VALID (видалено з numbers.txt)")
-                        continue
-
+                        self.wait_result_loaded(driver)
                     except Exception:
-                        # немає "Реєстрація послуг" → TRASH + назад, але номер лишається в numbers.txt
+                        # якщо взагалі нічого не з’явилось — вважаємо TRASH і залишаємо в numbers.txt
                         with open(TRASH_FILE, "a", encoding="utf-8") as f:
                             f.write(number + "\n")
-                        self.log("  🗑 Нема «Реєстрація послуг» → TRASH (залишив у numbers.txt)")
-                        try:
-                            self.back(driver, wait)
-                        except Exception:
-                            pass
-
+                        self.log("  🗑 Результат не прогрузився → TRASH (залишив у numbers.txt)")
                         remaining.append(number)
                         continue
 
+                    # ✅ якщо є "Реєстрація послуг" (у будь-якому контейнері) — реєструємо
+                    if self.has_services(driver):
+                        try:
+                            self.register_start_pack(driver)
+                            with open(VALID_FILE, "a", encoding="utf-8") as f:
+                                f.write(number + "\n")
+                            self.log("  ✔ Є «Реєстрація послуг» → Зареєстровано → VALID (видалено з numbers.txt)")
+                            # НЕ додаємо в remaining => видалиться з numbers.txt
+                            continue
+                        except Exception:
+                            with open(TRASH_FILE, "a", encoding="utf-8") as f:
+                                f.write(number + "\n")
+                            self.log("  🗑 Є «Реєстрація послуг», але не вийшло зареєструвати → TRASH (залишив у numbers.txt)")
+                            remaining.append(number)
+                            continue
+
+                    # ❌ немає services → TRASH + назад, і номер лишається в numbers.txt
+                    with open(TRASH_FILE, "a", encoding="utf-8") as f:
+                        f.write(number + "\n")
+                    self.log("  🗑 Нема «Реєстрація послуг» → TRASH (залишив у numbers.txt)")
+                    try:
+                        self.back(driver, wait)
+                    except Exception:
+                        pass
+                    remaining.append(number)
+                    continue
+
                 except Exception:
-                    # якщо десь зламалось на номері — теж залишимо в numbers.txt
                     with open(TRASH_FILE, "a", encoding="utf-8") as f:
                         f.write(number + "\n")
                     self.log("  🗑 Помилка на номері → TRASH (залишив у numbers.txt)")
@@ -243,7 +273,6 @@ class App:
                         pass
                     continue
 
-            # оновлюємо numbers.txt: лишаються тільки НЕзареєстровані
             save_numbers(remaining)
 
             if self.stop_event.is_set():
