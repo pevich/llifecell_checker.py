@@ -21,10 +21,14 @@ WAIT_LOGIN_SECONDS = 600
 WAIT_UI_SECONDS = 40
 
 
+def digits_only(s: str) -> str:
+    return re.sub(r"\D+", "", s or "")
+
+
 def sanitize_numbers(lines):
     out = []
     for s in lines:
-        s = re.sub(r"\D+", "", s.strip())
+        s = digits_only(s.strip())
         if not s:
             continue
         if len(s) == 9:
@@ -92,44 +96,76 @@ class App:
         self.worker = threading.Thread(target=self.run, daemon=True)
         self.worker.start()
 
-    # ----------------- Selenium helpers -----------------
+    # ---------- Selenium helpers ----------
 
     def js_click(self, driver, el):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        time.sleep(0.15)
+        time.sleep(0.12)
         driver.execute_script("arguments[0].click();", el)
 
-    def wait_login_ready(self, wait_login):
-        # Ждём появления "Клієнт" (после логина)
-        return wait_login.until(EC.element_to_be_clickable((
+    def wait_client_visible(self, wait_any):
+        return wait_any.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
         )))
 
-    def open_client(self, driver, wait_ui):
+    def click_client(self, driver, wait_ui):
         client = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
         )))
         self.js_click(driver, client)
 
-        # Ждём, что форма клиента реально отрисовалась (infix + input)
+        # чекаємо форму з інпутом
         wait_ui.until(EC.presence_of_element_located((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
-        wait_ui.until(EC.presence_of_element_located((By.ID, "msisdn")))
+        wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
         time.sleep(0.25)
 
-    def click_infix_then_get_input(self, driver, wait_ui):
-        # Кликаем по infix (обязательно для твоего сайта), потом получаем input заново
+    def click_back_once(self, driver, wait_ui):
+        btn = wait_ui.until(EC.element_to_be_clickable((
+            By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]"
+        )))
+        self.js_click(driver, btn)
+        time.sleep(0.7)
+
+    def back_to_home_two_steps(self, driver, wait_ui, wait_any):
+        """
+        Натискаємо 'Назад' 2 рази і ЧЕКАЄМО, поки з’явиться 'Клієнт' (головна).
+        Якщо з першого разу вже на головній — другий клік не робимо.
+        """
+        # 1-й назад
+        try:
+            self.click_back_once(driver, wait_ui)
+        except Exception:
+            pass
+
+        # якщо вже бачимо "Клієнт" — виходимо
+        try:
+            self.wait_client_visible(WebDriverWait(driver, 3))
+            return
+        except Exception:
+            pass
+
+        # 2-й назад
+        try:
+            self.click_back_once(driver, wait_ui)
+        except Exception:
+            pass
+
+        # фінально чекаємо головну
+        self.wait_client_visible(wait_any)
+        time.sleep(0.2)
+
+    def focus_infix_and_get_input(self, driver, wait_ui):
         infix = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
         self.js_click(driver, infix)
-        time.sleep(0.15)
+        time.sleep(0.12)
         inp = wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
         return inp
 
     def set_msisdn_value_js(self, driver, inp, full_number):
-        # Вставляем значение и триггерим события так, как ждёт Angular
         driver.execute_script(
             """
             const el = arguments[0];
@@ -144,35 +180,23 @@ class App:
         )
 
     def type_number_stable(self, driver, wait_ui, number9):
-        # Гарантированно вводим 380 + 9 цифр.
         full = "380" + number9
 
         for attempt in range(1, 4):
             try:
-                inp = self.click_infix_then_get_input(driver, wait_ui)
-
-                # ставим через JS
+                inp = self.focus_infix_and_get_input(driver, wait_ui)
                 self.set_msisdn_value_js(driver, inp, full)
-                time.sleep(0.2)
+                time.sleep(0.25)
 
-                # проверяем, что реально записалось
-                current = inp.get_attribute("value") or ""
-                cur_digits = re.sub(r"\D+", "", current)
-
-                if cur_digits.endswith(full):
+                cur = digits_only(inp.get_attribute("value"))
+                if cur.endswith(full) or cur.endswith(number9):
                     return True
 
-                # иногда поле хранит только последние цифры без 380 — допускаем это:
-                if cur_digits.endswith(number9):
-                    return True
-
-                self.log(f"  ⚠ Ввід не підтвердився, спроба {attempt}/3 (value='{current}')")
-                time.sleep(0.4)
-
+                self.log(f"  ⚠ Ввід не підтвердився, спроба {attempt}/3 (value='{inp.get_attribute('value')}')")
+                time.sleep(0.35)
             except (StaleElementReferenceException, TimeoutException):
                 self.log(f"  ⚠ Stale/Timeout на вводі, спроба {attempt}/3")
                 time.sleep(0.5)
-
         return False
 
     def click_search(self, driver, wait_ui):
@@ -180,13 +204,6 @@ class App:
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and contains(normalize-space(.),'Пошук')]]"
         )))
         self.js_click(driver, btn)
-
-    def click_back(self, driver, wait_ui):
-        btn = wait_ui.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]"
-        )))
-        self.js_click(driver, btn)
-        time.sleep(0.8)
 
     def is_unknown(self, driver):
         return len(driver.find_elements(
@@ -223,7 +240,7 @@ class App:
         self.js_click(driver, ok_btn)
         time.sleep(0.5)
 
-    # ----------------- Main run -----------------
+    # ---------- Main ----------
 
     def run(self):
         driver = None
@@ -248,7 +265,7 @@ class App:
             options.add_argument("--start-maximized")
             driver = webdriver.Chrome(options=options)
 
-            wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS)
+            wait_any = WebDriverWait(driver, WAIT_LOGIN_SECONDS)
             wait_ui = WebDriverWait(driver, WAIT_UI_SECONDS)
 
             driver.get(URL)
@@ -256,7 +273,8 @@ class App:
             self.set_status("Очікую авторизацію…")
             self.log("Увійди вручну (логін/пароль/SMS). Я продовжу, коли з’явиться «Клієнт».")
 
-            self.wait_login_ready(wait_login)
+            # логін підтверджено коли доступний "Клієнт"
+            self.wait_client_visible(wait_any)
             self.log("Авторизацію підтверджено ✅")
 
             for i, n in enumerate(nums, start=1):
@@ -264,38 +282,38 @@ class App:
                 self.set_status(f"Перевірка: 380{n}")
                 self.log(f"[{i}/{total}] Номер: 380{n}")
 
-                # 1) Відкрити "Клієнт"
-                self.open_client(driver, wait_ui)
+                # на всякий випадок: перед кожним номером повертаємось на головну
+                self.back_to_home_two_steps(driver, wait_ui, wait_any)
 
-                # 2) Ввести номер (стабільно, з ретраями)
+                # відкриваємо клієнт і вводимо
+                self.click_client(driver, wait_ui)
+
                 ok = self.type_number_stable(driver, wait_ui, n)
                 if not ok:
-                    self.log("  ⛔ Не вдалося ввести номер у поле. Записую як UNKNOWN і йду далі.")
+                    self.log("  ⛔ Не вдалося ввести номер. Записую як UNKNOWN.")
                     with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
+                    # повертаємось на головну для наступного
+                    self.back_to_home_two_steps(driver, wait_ui, wait_any)
                     continue
 
-                # 3) Пошук
+                # пошук
                 try:
                     self.click_search(driver, wait_ui)
                 except Exception:
-                    self.log("  ⛔ Не натиснувся «Пошук». UNKNOWN + назад.")
+                    self.log("  ⛔ Не натиснувся «Пошук». UNKNOWN.")
                     with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
-                    try:
-                        self.click_back(driver, wait_ui)
-                    except Exception:
-                        pass
+                    self.back_to_home_two_steps(driver, wait_ui, wait_any)
                     continue
 
-                # 4) Чекаємо результат
+                # чекаємо результат
                 deadline = time.time() + 20
                 while time.time() < deadline:
                     if self.is_unknown(driver) or self.is_lte_no_support(driver) or self.is_lte_support(driver):
                         break
                     time.sleep(0.25)
 
-                # 5) Обробка
                 if self.is_unknown(driver) or self.is_lte_no_support(driver):
                     if self.is_unknown(driver):
                         self.log("  → UNKNOWN")
@@ -305,10 +323,7 @@ class App:
                     with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
 
-                    try:
-                        self.click_back(driver, wait_ui)
-                    except Exception:
-                        pass
+                    self.back_to_home_two_steps(driver, wait_ui, wait_any)
                     continue
 
                 if self.is_lte_support(driver):
@@ -320,22 +335,16 @@ class App:
                         self.register_flow(driver, wait_ui)
                         self.log("  ✅ Зареєстровано + ОК")
                     except Exception:
-                        self.log("  ⚠ Реєстрація/ОК не вдалася — йду назад.")
+                        self.log("  ⚠ Реєстрація/ОК не вдалася — йду далі.")
 
-                    try:
-                        self.click_back(driver, wait_ui)
-                    except Exception:
-                        pass
+                    self.back_to_home_two_steps(driver, wait_ui, wait_any)
                     continue
 
-                # якщо нічого не визначив
+                # якщо нічого не визначили
                 self.log("  ⚠ Статус не визначив — UNKNOWN")
                 with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                     out.write(n + "\n")
-                try:
-                    self.click_back(driver, wait_ui)
-                except Exception:
-                    pass
+                self.back_to_home_two_steps(driver, wait_ui, wait_any)
 
             self.set_status("Готово ✅")
             self.log("Завершено. Файли: valid.txt / unknown.txt")
