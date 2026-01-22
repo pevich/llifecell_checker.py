@@ -100,23 +100,37 @@ class App:
         driver.execute_script("arguments[0].click();", el)
 
     def wait_login_ready(self, wait_login):
+        # Ждём появления "Клієнт" (после логина)
         return wait_login.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
         )))
 
-    def open_client(self, driver, wait_ui):
-        client = wait_ui.until(EC.element_to_be_clickable((
-            By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
-        )))
-        self.js_click(driver, client)
+    def ensure_client_or_input(self, driver, wait_ui):
+        """
+        1) Пробує натиснути 'Клієнт'
+        2) Якщо 'Клієнт' не знайдено — перевіряє, чи вже є поле msisdn
+        3) Якщо поле є — ок, працюємо далі
+        """
+        # швидка спроба "Клієнт"
+        try:
+            short_wait = WebDriverWait(driver, 3)
+            client = short_wait.until(EC.element_to_be_clickable((
+                By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
+            )))
+            self.js_click(driver, client)
+            time.sleep(0.25)
+        except Exception:
+            pass
 
+        # у будь-якому випадку чекаємо поле
         wait_ui.until(EC.presence_of_element_located((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
-        wait_ui.until(EC.presence_of_element_located((By.ID, "msisdn")))
-        time.sleep(0.25)
+        wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
+        time.sleep(0.15)
 
     def click_infix_then_get_input(self, driver, wait_ui):
+        # Кликаем по infix (обязательно для твоего сайта), потом получаем input заново
         infix = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
@@ -125,7 +139,7 @@ class App:
         inp = wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
         return inp
 
-    # ✅ FIX: Angular-friendly setter + InputEvent
+    # ✅ Angular-friendly setter + InputEvent
     def set_msisdn_value_js(self, driver, inp, full_number):
         driver.execute_script(
             """
@@ -145,7 +159,7 @@ class App:
             inp, full_number
         )
 
-    # ✅ FIX: clear via setter + 4 retries + verify value
+    # ✅ clear via setter + 4 retries + verify value
     def type_number_stable(self, driver, wait_ui, number9):
         full = "380" + number9
 
@@ -275,7 +289,8 @@ class App:
                 self.set_status(f"Перевірка: 380{n}")
                 self.log(f"[{i}/{total}] Номер: 380{n}")
 
-                self.open_client(driver, wait_ui)
+                # ✅ Тепер: якщо "Клієнт" не знайдено — працюємо через поле
+                self.ensure_client_or_input(driver, wait_ui)
 
                 ok = self.type_number_stable(driver, wait_ui, n)
                 if not ok:
@@ -292,7 +307,7 @@ class App:
                         out.write(n + "\n")
                     try:
                         self.click_back(driver, wait_ui)
-                        time.sleep(0.6)  # ✅ FIX: pause after back
+                        time.sleep(0.6)
                     except Exception:
                         pass
                     continue
@@ -302,9 +317,6 @@ class App:
                     if self.is_unknown(driver) or self.is_lte_no_support(driver) or self.is_lte_support(driver):
                         break
                     time.sleep(0.25)
-
-                if self.is_unknown(self.driver) if False else False:
-                    pass
 
                 if self.is_unknown(driver) or self.is_lte_no_support(driver):
                     if self.is_unknown(driver):
@@ -317,7 +329,7 @@ class App:
 
                     try:
                         self.click_back(driver, wait_ui)
-                        time.sleep(0.6)  # ✅ FIX: pause after back
+                        time.sleep(0.6)
                     except Exception:
                         pass
                     continue
@@ -335,7 +347,7 @@ class App:
 
                     try:
                         self.click_back(driver, wait_ui)
-                        time.sleep(0.6)  # ✅ FIX: pause after back
+                        time.sleep(0.6)
                     except Exception:
                         pass
                     continue
@@ -345,7 +357,7 @@ class App:
                     out.write(n + "\n")
                 try:
                     self.click_back(driver, wait_ui)
-                    time.sleep(0.6)  # ✅ FIX: pause after back
+                    time.sleep(0.6)
                 except Exception:
                     pass
 
