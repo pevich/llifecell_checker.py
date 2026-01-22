@@ -100,7 +100,6 @@ class App:
         driver.execute_script("arguments[0].click();", el)
 
     def wait_login_ready(self, wait_login):
-        # Ждём появления "Клієнт" (после логина)
         return wait_login.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
         )))
@@ -111,7 +110,6 @@ class App:
         )))
         self.js_click(driver, client)
 
-        # Ждём, что форма клиента реально отрисовалась (infix + input)
         wait_ui.until(EC.presence_of_element_located((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
@@ -119,7 +117,6 @@ class App:
         time.sleep(0.25)
 
     def click_infix_then_get_input(self, driver, wait_ui):
-        # Кликаем по infix (обязательно для твоего сайта), потом получаем input заново
         infix = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
@@ -128,49 +125,63 @@ class App:
         inp = wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
         return inp
 
+    # ✅ FIX: Angular-friendly setter + InputEvent
     def set_msisdn_value_js(self, driver, inp, full_number):
-        # Вставляем значение и триггерим события так, как ждёт Angular
         driver.execute_script(
             """
             const el = arguments[0];
             const val = arguments[1];
+
             el.focus();
-            el.value = val;
-            el.dispatchEvent(new Event('input', {bubbles:true}));
-            el.dispatchEvent(new Event('change', {bubbles:true}));
-            el.dispatchEvent(new Event('blur', {bubbles:true}));
+
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(el, val);
+
+            const ev = new InputEvent('input', { bubbles: true, cancelable: true, data: val, inputType: 'insertText' });
+            el.dispatchEvent(ev);
+
+            el.dispatchEvent(new Event('change', { bubbles: true }));
             """,
             inp, full_number
         )
 
+    # ✅ FIX: clear via setter + 4 retries + verify value
     def type_number_stable(self, driver, wait_ui, number9):
-        # Гарантированно вводим 380 + 9 цифр.
         full = "380" + number9
 
-        for attempt in range(1, 4):
+        for attempt in range(1, 5):
             try:
                 inp = self.click_infix_then_get_input(driver, wait_ui)
 
-                # ставим через JS
-                self.set_msisdn_value_js(driver, inp, full)
-                time.sleep(0.2)
+                # очистка через native setter
+                driver.execute_script(
+                    """
+                    const el = arguments[0];
+                    el.focus();
+                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(el, '');
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: '', inputType: 'deleteContentBackward' }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    """,
+                    inp
+                )
+                time.sleep(0.15)
 
-                # проверяем, что реально записалось
+                # ставимо значення
+                self.set_msisdn_value_js(driver, inp, full)
+                time.sleep(0.25)
+
                 current = inp.get_attribute("value") or ""
                 cur_digits = re.sub(r"\D+", "", current)
 
-                if cur_digits.endswith(full):
+                if cur_digits.endswith(full) or cur_digits.endswith(number9):
                     return True
 
-                # иногда поле хранит только последние цифры без 380 — допускаем это:
-                if cur_digits.endswith(number9):
-                    return True
-
-                self.log(f"  ⚠ Ввід не підтвердився, спроба {attempt}/3 (value='{current}')")
-                time.sleep(0.4)
+                self.log(f"  ⚠ Ввід не підтвердився, спроба {attempt}/4 (value='{current}')")
+                time.sleep(0.35)
 
             except (StaleElementReferenceException, TimeoutException):
-                self.log(f"  ⚠ Stale/Timeout на вводі, спроба {attempt}/3")
+                self.log(f"  ⚠ Stale/Timeout на вводі, спроба {attempt}/4")
                 time.sleep(0.5)
 
         return False
@@ -218,7 +229,7 @@ class App:
         self.js_click(driver, reg_btn)
 
         ok_btn = wait_ui.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
+            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок')]"
         )))
         self.js_click(driver, ok_btn)
         time.sleep(0.5)
@@ -264,10 +275,8 @@ class App:
                 self.set_status(f"Перевірка: 380{n}")
                 self.log(f"[{i}/{total}] Номер: 380{n}")
 
-                # 1) Відкрити "Клієнт"
                 self.open_client(driver, wait_ui)
 
-                # 2) Ввести номер (стабільно, з ретраями)
                 ok = self.type_number_stable(driver, wait_ui, n)
                 if not ok:
                     self.log("  ⛔ Не вдалося ввести номер у поле. Записую як UNKNOWN і йду далі.")
@@ -275,7 +284,6 @@ class App:
                         out.write(n + "\n")
                     continue
 
-                # 3) Пошук
                 try:
                     self.click_search(driver, wait_ui)
                 except Exception:
@@ -284,18 +292,20 @@ class App:
                         out.write(n + "\n")
                     try:
                         self.click_back(driver, wait_ui)
+                        time.sleep(0.6)  # ✅ FIX: pause after back
                     except Exception:
                         pass
                     continue
 
-                # 4) Чекаємо результат
                 deadline = time.time() + 20
                 while time.time() < deadline:
                     if self.is_unknown(driver) or self.is_lte_no_support(driver) or self.is_lte_support(driver):
                         break
                     time.sleep(0.25)
 
-                # 5) Обробка
+                if self.is_unknown(self.driver) if False else False:
+                    pass
+
                 if self.is_unknown(driver) or self.is_lte_no_support(driver):
                     if self.is_unknown(driver):
                         self.log("  → UNKNOWN")
@@ -307,6 +317,7 @@ class App:
 
                     try:
                         self.click_back(driver, wait_ui)
+                        time.sleep(0.6)  # ✅ FIX: pause after back
                     except Exception:
                         pass
                     continue
@@ -324,16 +335,17 @@ class App:
 
                     try:
                         self.click_back(driver, wait_ui)
+                        time.sleep(0.6)  # ✅ FIX: pause after back
                     except Exception:
                         pass
                     continue
 
-                # якщо нічого не визначив
                 self.log("  ⚠ Статус не визначив — UNKNOWN")
                 with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                     out.write(n + "\n")
                 try:
                     self.click_back(driver, wait_ui)
+                    time.sleep(0.6)  # ✅ FIX: pause after back
                 except Exception:
                     pass
 
