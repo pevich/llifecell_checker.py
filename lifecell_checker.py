@@ -7,10 +7,9 @@ from tkinter import ttk, messagebox
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
 URL = "https://my-ambassador.lifecell.ua"
 
@@ -19,16 +18,13 @@ VALID_FILE = "valid.txt"
 UNKNOWN_FILE = "unknown.txt"
 
 WAIT_LOGIN_SECONDS = 600
-WAIT_UI_SECONDS = 30
+WAIT_UI_SECONDS = 40
 
 
 def sanitize_numbers(lines):
     out = []
     for s in lines:
-        s = s.strip()
-        if not s:
-            continue
-        s = re.sub(r"\D+", "", s)
+        s = re.sub(r"\D+", "", s.strip())
         if not s:
             continue
         if len(s) == 9:
@@ -46,41 +42,32 @@ class App:
         self.root.title("Lifecell LTE Checker")
         self.root.geometry("720x420")
         self.root.minsize(720, 420)
-        self.root.resizable(True, True)
 
         self.status_var = tk.StringVar(value="Готово. Натисни «Почати»")
         self.progress_var = tk.StringVar(value="0 / 0")
 
-        # ---------- HEADER ----------
-        title = ttk.Label(root, text="Lifecell LTE Checker", font=("Segoe UI", 18, "bold"))
-        title.pack(pady=(12, 6))
-
-        info = ttk.Label(
+        ttk.Label(root, text="Lifecell LTE Checker", font=("Segoe UI", 18, "bold")).pack(pady=(12, 6))
+        ttk.Label(
             root,
-            text="Формат numbers.txt: тільки цифри ПІСЛЯ 380 (наприклад: 935180140)\n"
-                 "Після запуску відкриється сайт — зайди в акаунт вручну (логін/пароль/SMS).",
+            text="numbers.txt: тільки цифри ПІСЛЯ 380 (наприклад 935180140)\n"
+                 "Після запуску увійди вручну (логін/пароль/SMS).",
             justify="center"
-        )
-        info.pack(pady=(0, 8))
+        ).pack(pady=(0, 8))
 
-        # ---------- STATUS BAR ----------
         bar = ttk.Frame(root)
         bar.pack(fill="x", padx=14, pady=(4, 6))
         ttk.Label(bar, textvariable=self.status_var).pack(side="left")
         ttk.Label(bar, textvariable=self.progress_var).pack(side="right")
 
-        # ---------- BOTTOM BUTTONS (ПРИБИТО СНИЗУ) ----------
         btns = ttk.Frame(root)
         btns.pack(side="bottom", fill="x", padx=14, pady=(8, 14))
         self.start_btn = ttk.Button(btns, text="▶ Почати", command=self.start)
         self.start_btn.pack(side="left")
 
-        # ---------- LOG (ОСТАЕТСЯ В СЕРЕДИНЕ) ----------
         self.log_box = tk.Text(root, height=12, wrap="word")
         self.log_box.pack(side="top", fill="both", expand=True, padx=14, pady=(6, 6))
         self.log_box.configure(state="disabled")
 
-        self.stop_flag = False
         self.worker = None
 
     def log(self, msg: str):
@@ -101,63 +88,101 @@ class App:
     def start(self):
         if self.worker and self.worker.is_alive():
             return
-        self.stop_flag = False
         self.start_btn.configure(state="disabled")
         self.worker = threading.Thread(target=self.run, daemon=True)
         self.worker.start()
 
-    # -------- Selenium helpers --------
+    # ----------------- Selenium helpers -----------------
 
     def js_click(self, driver, el):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
         time.sleep(0.15)
         driver.execute_script("arguments[0].click();", el)
 
-    def wait_login(self, wait):
-        return wait.until(EC.element_to_be_clickable((
+    def wait_login_ready(self, wait_login):
+        # Ждём появления "Клієнт" (после логина)
+        return wait_login.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
         )))
 
-    def open_client(self, driver, wait):
-        client = wait.until(EC.element_to_be_clickable((
+    def open_client(self, driver, wait_ui):
+        client = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
         )))
         self.js_click(driver, client)
-        time.sleep(0.5)
 
-    def get_msisdn_input(self, wait):
-        return wait.until(EC.visibility_of_element_located((By.ID, "msisdn")))
+        # Ждём, что форма клиента реально отрисовалась (infix + input)
+        wait_ui.until(EC.presence_of_element_located((
+            By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
+        )))
+        wait_ui.until(EC.presence_of_element_located((By.ID, "msisdn")))
+        time.sleep(0.25)
 
-    def focus_input_infix_first(self, driver, wait):
-        infix = wait.until(EC.element_to_be_clickable((
+    def click_infix_then_get_input(self, driver, wait_ui):
+        # Кликаем по infix (обязательно для твоего сайта), потом получаем input заново
+        infix = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
         self.js_click(driver, infix)
-        time.sleep(0.2)
+        time.sleep(0.15)
+        inp = wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
+        return inp
 
-    def clear_after_380_and_type(self, driver, wait, number9):
-        self.focus_input_infix_first(driver, wait)
-        field = self.get_msisdn_input(wait)
+    def set_msisdn_value_js(self, driver, inp, full_number):
+        # Вставляем значение и триггерим события так, как ждёт Angular
+        driver.execute_script(
+            """
+            const el = arguments[0];
+            const val = arguments[1];
+            el.focus();
+            el.value = val;
+            el.dispatchEvent(new Event('input', {bubbles:true}));
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            el.dispatchEvent(new Event('blur', {bubbles:true}));
+            """,
+            inp, full_number
+        )
 
-        self.js_click(driver, field)
-        time.sleep(0.1)
+    def type_number_stable(self, driver, wait_ui, number9):
+        # Гарантированно вводим 380 + 9 цифр.
+        full = "380" + number9
 
-        field.send_keys(Keys.END)
-        for _ in range(16):
-            field.send_keys(Keys.BACKSPACE)
-        time.sleep(0.1)
+        for attempt in range(1, 4):
+            try:
+                inp = self.click_infix_then_get_input(driver, wait_ui)
 
-        field.send_keys(number9)
-        time.sleep(0.2)
+                # ставим через JS
+                self.set_msisdn_value_js(driver, inp, full)
+                time.sleep(0.2)
 
-    def click_search(self, driver, wait):
-        btn = wait.until(EC.element_to_be_clickable((
+                # проверяем, что реально записалось
+                current = inp.get_attribute("value") or ""
+                cur_digits = re.sub(r"\D+", "", current)
+
+                if cur_digits.endswith(full):
+                    return True
+
+                # иногда поле хранит только последние цифры без 380 — допускаем это:
+                if cur_digits.endswith(number9):
+                    return True
+
+                self.log(f"  ⚠ Ввід не підтвердився, спроба {attempt}/3 (value='{current}')")
+                time.sleep(0.4)
+
+            except (StaleElementReferenceException, TimeoutException):
+                self.log(f"  ⚠ Stale/Timeout на вводі, спроба {attempt}/3")
+                time.sleep(0.5)
+
+        return False
+
+    def click_search(self, driver, wait_ui):
+        btn = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and contains(normalize-space(.),'Пошук')]]"
         )))
         self.js_click(driver, btn)
 
-    def click_back(self, driver, wait):
-        btn = wait.until(EC.element_to_be_clickable((
+    def click_back(self, driver, wait_ui):
+        btn = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]"
         )))
         self.js_click(driver, btn)
@@ -181,26 +206,27 @@ class App:
             "//div[contains(@class,'header') and contains(@class,'support') and contains(normalize-space(.),'LTE')]"
         )) > 0
 
-    def click_register_flow(self, driver, wait):
-        reg = wait.until(EC.element_to_be_clickable((
+    def register_flow(self, driver, wait_ui):
+        reg = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and contains(normalize-space(.),'Реєстрація стартового пакету')]"
         )))
         self.js_click(driver, reg)
 
-        reg_btn = wait.until(EC.element_to_be_clickable((
+        reg_btn = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and contains(normalize-space(.),'Зареєструвати')]]"
         )))
         self.js_click(driver, reg_btn)
 
-        ok_btn = wait.until(EC.element_to_be_clickable((
+        ok_btn = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
         )))
         self.js_click(driver, ok_btn)
-        time.sleep(0.6)
+        time.sleep(0.5)
 
-    # -------- Main run --------
+    # ----------------- Main run -----------------
 
     def run(self):
+        driver = None
         try:
             if not os.path.exists(INPUT_FILE):
                 messagebox.showerror("Помилка", f"Не знайдено {INPUT_FILE} поруч з програмою.")
@@ -230,7 +256,7 @@ class App:
             self.set_status("Очікую авторизацію…")
             self.log("Увійди вручну (логін/пароль/SMS). Я продовжу, коли з’явиться «Клієнт».")
 
-            self.wait_login(wait_login)
+            self.wait_login_ready(wait_login)
             self.log("Авторизацію підтверджено ✅")
 
             for i, n in enumerate(nums, start=1):
@@ -238,27 +264,22 @@ class App:
                 self.set_status(f"Перевірка: 380{n}")
                 self.log(f"[{i}/{total}] Номер: 380{n}")
 
+                # 1) Відкрити "Клієнт"
                 self.open_client(driver, wait_ui)
 
-                try:
-                    for attempt in range(3):
-                        try:
-                            self.clear_after_380_and_type(driver, wait_ui, n)
-                            break
-                        except (StaleElementReferenceException, TimeoutException):
-                            time.sleep(0.4)
-                            if attempt == 2:
-                                raise
-                except Exception:
-                    self.log("  ⛔ Не вдалося знайти/ввести msisdn. Записую як UNKNOWN.")
+                # 2) Ввести номер (стабільно, з ретраями)
+                ok = self.type_number_stable(driver, wait_ui, n)
+                if not ok:
+                    self.log("  ⛔ Не вдалося ввести номер у поле. Записую як UNKNOWN і йду далі.")
                     with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
                     continue
 
+                # 3) Пошук
                 try:
                     self.click_search(driver, wait_ui)
                 except Exception:
-                    self.log("  ⛔ Не натиснувся «Пошук». Записую як UNKNOWN і назад.")
+                    self.log("  ⛔ Не натиснувся «Пошук». UNKNOWN + назад.")
                     with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
                     try:
@@ -267,16 +288,23 @@ class App:
                         pass
                     continue
 
+                # 4) Чекаємо результат
                 deadline = time.time() + 20
                 while time.time() < deadline:
                     if self.is_unknown(driver) or self.is_lte_no_support(driver) or self.is_lte_support(driver):
                         break
                     time.sleep(0.25)
 
+                # 5) Обробка
                 if self.is_unknown(driver) or self.is_lte_no_support(driver):
-                    self.log("  → UNKNOWN / LTE (no-support)")
+                    if self.is_unknown(driver):
+                        self.log("  → UNKNOWN")
+                    else:
+                        self.log("  → LTE (не підтримує)")
+
                     with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
+
                     try:
                         self.click_back(driver, wait_ui)
                     except Exception:
@@ -284,20 +312,23 @@ class App:
                     continue
 
                 if self.is_lte_support(driver):
-                    self.log("  → LTE (support) → Реєстрація…")
+                    self.log("  → LTE (підтримує) → Реєстрація…")
                     with open(VALID_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
+
                     try:
-                        self.click_register_flow(driver, wait_ui)
+                        self.register_flow(driver, wait_ui)
                         self.log("  ✅ Зареєстровано + ОК")
                     except Exception:
                         self.log("  ⚠ Реєстрація/ОК не вдалася — йду назад.")
+
                     try:
                         self.click_back(driver, wait_ui)
                     except Exception:
                         pass
                     continue
 
+                # якщо нічого не визначив
                 self.log("  ⚠ Статус не визначив — UNKNOWN")
                 with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                     out.write(n + "\n")
@@ -308,14 +339,15 @@ class App:
 
             self.set_status("Готово ✅")
             self.log("Завершено. Файли: valid.txt / unknown.txt")
-            try:
-                driver.quit()
-            except Exception:
-                pass
 
         except Exception as e:
             messagebox.showerror("Помилка", str(e))
         finally:
+            try:
+                if driver:
+                    driver.quit()
+            except Exception:
+                pass
             self.start_btn.configure(state="normal")
 
 
