@@ -16,9 +16,16 @@ URL = "https://my-ambassador.lifecell.ua"
 INPUT_FILE = "numbers.txt"
 VALID_FILE = "valid.txt"
 UNKNOWN_FILE = "unknown.txt"
+TRASH_FILE = "trash.txt"
 
 WAIT_LOGIN_SECONDS = 600
-WAIT_UI_SECONDS = 40
+
+# ✅ TURBO: коротші таймаути + частіший poll
+WAIT_UI_SECONDS = 10
+POLL = 0.05
+
+# ✅ TURBO: мінімальні паузи (0 = максимально швидко, але може бути менш стабільно)
+TINY_SLEEP = 0.02
 
 
 def sanitize_numbers(lines):
@@ -39,14 +46,17 @@ def sanitize_numbers(lines):
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Lifecell LTE Checker")
-        self.root.geometry("720x420")
-        self.root.minsize(720, 420)
+        self.root.title("Lifecell LTE Checker (TURBO)")
+        self.root.geometry("760x460")
+        self.root.minsize(760, 460)
 
         self.status_var = tk.StringVar(value="Готово. Натисни «Почати»")
         self.progress_var = tk.StringVar(value="0 / 0")
 
-        ttk.Label(root, text="Lifecell LTE Checker", font=("Segoe UI", 18, "bold")).pack(pady=(12, 6))
+        self.stop_event = threading.Event()
+        self.worker = None
+
+        ttk.Label(root, text="Lifecell LTE Checker (TURBO)", font=("Segoe UI", 18, "bold")).pack(pady=(12, 6))
         ttk.Label(
             root,
             text="numbers.txt: тільки цифри ПІСЛЯ 380 (наприклад 935180140)\n"
@@ -60,15 +70,17 @@ class App:
         ttk.Label(bar, textvariable=self.progress_var).pack(side="right")
 
         btns = ttk.Frame(root)
-        btns.pack(side="bottom", fill="x", padx=14, pady=(8, 14))
+        btns.pack(fill="x", padx=14, pady=(6, 10))
+
         self.start_btn = ttk.Button(btns, text="▶ Почати", command=self.start)
         self.start_btn.pack(side="left")
 
-        self.log_box = tk.Text(root, height=12, wrap="word")
-        self.log_box.pack(side="top", fill="both", expand=True, padx=14, pady=(6, 6))
-        self.log_box.configure(state="disabled")
+        self.stop_btn = ttk.Button(btns, text="⏹ Стоп", command=self.stop, state="disabled")
+        self.stop_btn.pack(side="left", padx=(10, 0))
 
-        self.worker = None
+        self.log_box = tk.Text(root, height=14, wrap="word")
+        self.log_box.pack(side="top", fill="both", expand=True, padx=14, pady=(6, 10))
+        self.log_box.configure(state="disabled")
 
     def log(self, msg: str):
         self.log_box.configure(state="normal")
@@ -88,16 +100,24 @@ class App:
     def start(self):
         if self.worker and self.worker.is_alive():
             return
+        self.stop_event.clear()
         self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
         self.worker = threading.Thread(target=self.run, daemon=True)
         self.worker.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.set_status("Зупинка… (дочекайся завершення поточного кроку)")
+        self.log("⏹ Стоп натиснуто. Зупиняю після поточного номера…")
 
     # ----------------- Selenium helpers -----------------
 
     def js_click(self, driver, el):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        time.sleep(0.12)
         driver.execute_script("arguments[0].click();", el)
+        if TINY_SLEEP:
+            time.sleep(TINY_SLEEP)
 
     def wait_login_ready(self, wait_login):
         return wait_login.until(EC.element_to_be_clickable((
@@ -105,17 +125,13 @@ class App:
         )))
 
     def ensure_client_or_input(self, driver, wait_ui):
-        """
-        1) Пробує натиснути 'Клієнт'
-        2) Якщо 'Клієнт' не знайдено — перевіряє, чи вже є поле msisdn
-        """
+        # швидка спроба "Клієнт"
         try:
-            short_wait = WebDriverWait(driver, 3)
+            short_wait = WebDriverWait(driver, 1.5, poll_frequency=POLL)
             client = short_wait.until(EC.element_to_be_clickable((
                 By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
             )))
             self.js_click(driver, client)
-            time.sleep(0.25)
         except Exception:
             pass
 
@@ -123,23 +139,19 @@ class App:
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
         wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
-        time.sleep(0.15)
 
     def click_infix_then_get_input(self, driver, wait_ui):
         infix = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
         self.js_click(driver, infix)
-        time.sleep(0.15)
-        inp = wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
-        return inp
+        return wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
 
     def set_msisdn_value_js(self, driver, inp, full_number):
         driver.execute_script(
             """
             const el = arguments[0];
             const val = arguments[1];
-
             el.focus();
 
             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
@@ -147,19 +159,19 @@ class App:
 
             const ev = new InputEvent('input', { bubbles: true, cancelable: true, data: val, inputType: 'insertText' });
             el.dispatchEvent(ev);
-
             el.dispatchEvent(new Event('change', { bubbles: true }));
             """,
             inp, full_number
         )
 
-    def type_number_stable(self, driver, wait_ui, number9):
+    def type_number_turbo(self, driver, wait_ui, number9):
         full = "380" + number9
-
-        for attempt in range(1, 5):
+        # TURBO: 2 спроби
+        for attempt in range(1, 3):
             try:
                 inp = self.click_infix_then_get_input(driver, wait_ui)
 
+                # очистка
                 driver.execute_script(
                     """
                     const el = arguments[0];
@@ -171,24 +183,16 @@ class App:
                     """,
                     inp
                 )
-                time.sleep(0.15)
 
                 self.set_msisdn_value_js(driver, inp, full)
-                time.sleep(0.25)
 
-                current = inp.get_attribute("value") or ""
-                cur_digits = re.sub(r"\D+", "", current)
-
+                cur = inp.get_attribute("value") or ""
+                cur_digits = re.sub(r"\D+", "", cur)
                 if cur_digits.endswith(full) or cur_digits.endswith(number9):
                     return True
-
-                self.log(f"  ⚠ Ввід не підтвердився, спроба {attempt}/4 (value='{current}')")
-                time.sleep(0.35)
-
+                self.log(f"  ⚠ Ввід не підтвердився, спроба {attempt}/2 (value='{cur}')")
             except (StaleElementReferenceException, TimeoutException):
-                self.log(f"  ⚠ Stale/Timeout на вводі, спроба {attempt}/4")
-                time.sleep(0.5)
-
+                self.log(f"  ⚠ Stale/Timeout на вводі, спроба {attempt}/2")
         return False
 
     def click_search(self, driver, wait_ui):
@@ -202,7 +206,6 @@ class App:
             By.XPATH, "//button[.//mat-icon[normalize-space(text())='arrow_back']]"
         )))
         self.js_click(driver, btn)
-        time.sleep(0.8)
 
     def is_unknown(self, driver):
         return len(driver.find_elements(
@@ -222,23 +225,34 @@ class App:
             "//div[contains(@class,'header') and contains(@class,'support') and contains(normalize-space(.),'LTE')]"
         )) > 0
 
-    # ✅ Нове: якщо вже на "Реєстрація стартового пакету" — не тиснемо назад, тиснемо Зареєструвати + Ок
-    def register_flow(self, driver, wait_ui):
-        reg = wait_ui.until(EC.element_to_be_clickable((
-            By.XPATH, "//div[contains(@class,'label') and contains(normalize-space(.),'Реєстрація стартового пакету')]"
-        )))
+    def wait_result_any_turbo(self, driver):
+        # TURBO: коротше очікування результату
+        WebDriverWait(driver, 8, poll_frequency=POLL).until(
+            lambda d: self.is_unknown(d) or self.is_lte_no_support(d) or self.is_lte_support(d)
+        )
+
+    def register_flow_if_exists_turbo(self, driver):
+        # TURBO: коротший пошук "Реєстрація..."
+        short = WebDriverWait(driver, 1.2, poll_frequency=POLL)
+        try:
+            reg = short.until(EC.element_to_be_clickable((
+                By.XPATH, "//div[contains(@class,'label') and contains(normalize-space(.),'Реєстрація стартового пакету')]"
+            )))
+        except TimeoutException:
+            return False
+
         self.js_click(driver, reg)
 
-        reg_btn = wait_ui.until(EC.element_to_be_clickable((
+        reg_btn = WebDriverWait(driver, 4, poll_frequency=POLL).until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
         )))
         self.js_click(driver, reg_btn)
 
-        ok_btn = wait_ui.until(EC.element_to_be_clickable((
+        ok_btn = WebDriverWait(driver, 5, poll_frequency=POLL).until(EC.element_to_be_clickable((
             By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
         )))
         self.js_click(driver, ok_btn)
-        time.sleep(0.5)
+        return True
 
     # ----------------- Main run -----------------
 
@@ -265,8 +279,8 @@ class App:
             options.add_argument("--start-maximized")
             driver = webdriver.Chrome(options=options)
 
-            wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS)
-            wait_ui = WebDriverWait(driver, WAIT_UI_SECONDS)
+            wait_login = WebDriverWait(driver, WAIT_LOGIN_SECONDS, poll_frequency=POLL)
+            wait_ui = WebDriverWait(driver, WAIT_UI_SECONDS, poll_frequency=POLL)
 
             driver.get(URL)
 
@@ -277,16 +291,20 @@ class App:
             self.log("Авторизацію підтверджено ✅")
 
             for i, n in enumerate(nums, start=1):
+                if self.stop_event.is_set():
+                    self.log("⏹ Зупинено.")
+                    self.set_status("Зупинено ✅")
+                    break
+
                 self.set_progress(i, total)
                 self.set_status(f"Перевірка: 380{n}")
                 self.log(f"[{i}/{total}] Номер: 380{n}")
 
-                # форма клієнта або вже відкрита
                 self.ensure_client_or_input(driver, wait_ui)
 
-                ok = self.type_number_stable(driver, wait_ui, n)
+                ok = self.type_number_turbo(driver, wait_ui, n)
                 if not ok:
-                    self.log("  ⛔ Не вдалося ввести номер у поле. Записую як UNKNOWN і йду далі.")
+                    self.log("  ⛔ Не вдалося ввести номер → UNKNOWN")
                     with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
                     continue
@@ -294,23 +312,23 @@ class App:
                 try:
                     self.click_search(driver, wait_ui)
                 except Exception:
-                    self.log("  ⛔ Не натиснувся «Пошук». UNKNOWN + назад.")
+                    self.log("  ⛔ Не натиснувся «Пошук» → UNKNOWN + назад")
                     with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                         out.write(n + "\n")
                     try:
                         self.click_back(driver, wait_ui)
-                        time.sleep(0.6)
                     except Exception:
                         pass
                     continue
 
-                deadline = time.time() + 20
-                while time.time() < deadline:
-                    if self.is_unknown(driver) or self.is_lte_no_support(driver) or self.is_lte_support(driver):
-                        break
-                    time.sleep(0.25)
+                try:
+                    self.wait_result_any_turbo(driver)
+                except Exception:
+                    self.log("  ⚠ Не дочекався статусу → UNKNOWN")
+                    with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
+                        out.write(n + "\n")
+                    continue
 
-                # UNKNOWN / no-support → назад і наступний
                 if self.is_unknown(driver) or self.is_lte_no_support(driver):
                     if self.is_unknown(driver):
                         self.log("  → UNKNOWN")
@@ -322,38 +340,38 @@ class App:
 
                     try:
                         self.click_back(driver, wait_ui)
-                        time.sleep(0.6)
                     except Exception:
                         pass
                     continue
 
-                # LTE support → Реєстрація → Зареєструвати → Ок → одразу наступний номер (без натискання Назад)
                 if self.is_lte_support(driver):
-                    self.log("  → LTE (підтримує) → Реєстрація…")
-                    with open(VALID_FILE, "a", encoding="utf-8") as out:
-                        out.write(n + "\n")
+                    self.log("  → LTE (підтримує)")
 
+                    did_reg = False
                     try:
-                        self.register_flow(driver, wait_ui)
-                        self.log("  ✅ Зареєстровано + ОК")
+                        did_reg = self.register_flow_if_exists_turbo(driver)
                     except Exception:
-                        self.log("  ⚠ Реєстрація/ОК не вдалася — все одно йду до наступного номера.")
+                        did_reg = False
 
-                    # ❗ НЕ тиснемо "назад" тут — як ти просив
+                    if did_reg:
+                        self.log("  ✅ Зареєстровано (Зареєструвати → Ок)")
+                        with open(VALID_FILE, "a", encoding="utf-8") as out:
+                            out.write(n + "\n")
+                    else:
+                        self.log("  🗑 LTE є, але нема «Реєстрація стартового пакету» → TRASH")
+                        with open(TRASH_FILE, "a", encoding="utf-8") as out:
+                            out.write(n + "\n")
+
+                    # НЕ тиснемо "назад" після Ок — одразу наступний
                     continue
 
-                # якщо нічого не визначив
-                self.log("  ⚠ Статус не визначив — UNKNOWN")
+                self.log("  ⚠ Статус не визначив → UNKNOWN")
                 with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                     out.write(n + "\n")
-                try:
-                    self.click_back(driver, wait_ui)
-                    time.sleep(0.6)
-                except Exception:
-                    pass
 
-            self.set_status("Готово ✅")
-            self.log("Завершено. Файли: valid.txt / unknown.txt")
+            if not self.stop_event.is_set():
+                self.set_status("Готово ✅")
+                self.log("Завершено. Файли: valid.txt / unknown.txt / trash.txt")
 
         except Exception as e:
             messagebox.showerror("Помилка", str(e))
@@ -364,6 +382,7 @@ class App:
             except Exception:
                 pass
             self.start_btn.configure(state="normal")
+            self.stop_btn.configure(state="disabled")
 
 
 if __name__ == "__main__":
