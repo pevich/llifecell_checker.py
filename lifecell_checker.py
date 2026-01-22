@@ -96,11 +96,10 @@ class App:
 
     def js_click(self, driver, el):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        time.sleep(0.15)
+        time.sleep(0.12)
         driver.execute_script("arguments[0].click();", el)
 
     def wait_login_ready(self, wait_login):
-        # Ждём появления "Клієнт" (после логина)
         return wait_login.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and normalize-space(text())='Клієнт']"
         )))
@@ -109,9 +108,7 @@ class App:
         """
         1) Пробує натиснути 'Клієнт'
         2) Якщо 'Клієнт' не знайдено — перевіряє, чи вже є поле msisdn
-        3) Якщо поле є — ок, працюємо далі
         """
-        # швидка спроба "Клієнт"
         try:
             short_wait = WebDriverWait(driver, 3)
             client = short_wait.until(EC.element_to_be_clickable((
@@ -122,7 +119,6 @@ class App:
         except Exception:
             pass
 
-        # у будь-якому випадку чекаємо поле
         wait_ui.until(EC.presence_of_element_located((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
@@ -130,7 +126,6 @@ class App:
         time.sleep(0.15)
 
     def click_infix_then_get_input(self, driver, wait_ui):
-        # Кликаем по infix (обязательно для твоего сайта), потом получаем input заново
         infix = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'mat-form-field-infix')][.//input[@id='msisdn']]"
         )))
@@ -139,7 +134,6 @@ class App:
         inp = wait_ui.until(EC.visibility_of_element_located((By.ID, "msisdn")))
         return inp
 
-    # ✅ Angular-friendly setter + InputEvent
     def set_msisdn_value_js(self, driver, inp, full_number):
         driver.execute_script(
             """
@@ -159,7 +153,6 @@ class App:
             inp, full_number
         )
 
-    # ✅ clear via setter + 4 retries + verify value
     def type_number_stable(self, driver, wait_ui, number9):
         full = "380" + number9
 
@@ -167,7 +160,6 @@ class App:
             try:
                 inp = self.click_infix_then_get_input(driver, wait_ui)
 
-                # очистка через native setter
                 driver.execute_script(
                     """
                     const el = arguments[0];
@@ -181,7 +173,6 @@ class App:
                 )
                 time.sleep(0.15)
 
-                # ставимо значення
                 self.set_msisdn_value_js(driver, inp, full)
                 time.sleep(0.25)
 
@@ -231,6 +222,7 @@ class App:
             "//div[contains(@class,'header') and contains(@class,'support') and contains(normalize-space(.),'LTE')]"
         )) > 0
 
+    # ✅ Нове: якщо вже на "Реєстрація стартового пакету" — не тиснемо назад, тиснемо Зареєструвати + Ок
     def register_flow(self, driver, wait_ui):
         reg = wait_ui.until(EC.element_to_be_clickable((
             By.XPATH, "//div[contains(@class,'label') and contains(normalize-space(.),'Реєстрація стартового пакету')]"
@@ -238,12 +230,12 @@ class App:
         self.js_click(driver, reg)
 
         reg_btn = wait_ui.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and contains(normalize-space(.),'Зареєструвати')]]"
+            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Зареєструвати']]"
         )))
         self.js_click(driver, reg_btn)
 
         ok_btn = wait_ui.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок')]"
+            By.XPATH, "//button[.//span[contains(@class,'mat-button-wrapper') and normalize-space(.)='Ок']]"
         )))
         self.js_click(driver, ok_btn)
         time.sleep(0.5)
@@ -289,7 +281,7 @@ class App:
                 self.set_status(f"Перевірка: 380{n}")
                 self.log(f"[{i}/{total}] Номер: 380{n}")
 
-                # ✅ Тепер: якщо "Клієнт" не знайдено — працюємо через поле
+                # форма клієнта або вже відкрита
                 self.ensure_client_or_input(driver, wait_ui)
 
                 ok = self.type_number_stable(driver, wait_ui, n)
@@ -318,6 +310,7 @@ class App:
                         break
                     time.sleep(0.25)
 
+                # UNKNOWN / no-support → назад і наступний
                 if self.is_unknown(driver) or self.is_lte_no_support(driver):
                     if self.is_unknown(driver):
                         self.log("  → UNKNOWN")
@@ -334,6 +327,7 @@ class App:
                         pass
                     continue
 
+                # LTE support → Реєстрація → Зареєструвати → Ок → одразу наступний номер (без натискання Назад)
                 if self.is_lte_support(driver):
                     self.log("  → LTE (підтримує) → Реєстрація…")
                     with open(VALID_FILE, "a", encoding="utf-8") as out:
@@ -343,15 +337,12 @@ class App:
                         self.register_flow(driver, wait_ui)
                         self.log("  ✅ Зареєстровано + ОК")
                     except Exception:
-                        self.log("  ⚠ Реєстрація/ОК не вдалася — йду назад.")
+                        self.log("  ⚠ Реєстрація/ОК не вдалася — все одно йду до наступного номера.")
 
-                    try:
-                        self.click_back(driver, wait_ui)
-                        time.sleep(0.6)
-                    except Exception:
-                        pass
+                    # ❗ НЕ тиснемо "назад" тут — як ти просив
                     continue
 
+                # якщо нічого не визначив
                 self.log("  ⚠ Статус не визначив — UNKNOWN")
                 with open(UNKNOWN_FILE, "a", encoding="utf-8") as out:
                     out.write(n + "\n")
